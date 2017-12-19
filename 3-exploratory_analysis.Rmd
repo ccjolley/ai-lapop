@@ -1,0 +1,389 @@
+---
+title: 'Part 3: Exploratory data analysis'
+author: "Craig Jolley"
+date: "December 14, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading packages and data
+
+Just like in the previous documents [**link**], we'll start by loading the packages we'll need for this session, and then load the original AmericasBarometer dataset as well as the results from last time.
+
+```{r load_data, warning=FALSE, message=FALSE}
+library(haven)
+library(ggplot2)
+library(ggmap)
+library(qgraph)
+library(choroplethr)
+library(dplyr)
+library(knitr)
+
+setwd("C:/Users/Craig/Desktop/Live projects/AI/LAPOP")
+load('w_imp.rda')
+
+# NOTE: loading the original LAPOP dataset makes my laptop want to cry,
+# so I saved the result on a previous run and am just loading what I need.
+
+# lapop <- read_dta('AmericasBarometer Grand Merge 2004-2014 v3.0_FREE.dta') %>% 
+#   filter(year >= 2012)
+# pais_labels <- data.frame(country_name=names(attr(lapop[['pais']],'labels')),
+#                           pais=attr(lapop[['pais']],'labels') %>% as.factor)
+# save(pais_labels,file='pais_labels.rda')
+load('pais_labels.rda')
+```
+
+## Mapping
+
+We'll start with a simple geographic analysis, mapping out the areas where our poverty indices are particularly high. Note that we need to fix the spelling of Haiti, and the simple mapping function we're using apparently can't handle the Bahamas or Barbados. We're looking first at the poverty index that used variable scaling in the initial PCA calculation.
+
+```{r map, warning=FALSE}
+geo_poverty <- w_imp %>%
+  group_by(pais) %>%
+  summarize(poor_mean=mean(poor_scaled),poor_sum=sum(poor_scaled),
+            poor2_mean=mean(poor_unscaled),poor2_sum=sum(poor_unscaled),
+            n=n()) %>%
+  left_join(pais_labels,by='pais') %>%
+  mutate(country_name=as.character(country_name),
+         country_name=ifelse(grepl('Hait',country_name),'Haiti',country_name)) 
+
+map_me <- geo_poverty %>%
+  select(country_name,poor_mean) %>%
+  dplyr::rename(region=country_name,value=poor_mean) %>%
+  filter(!(region %in% c('Bahamas','Barbados'))) %>%
+  mutate(region=tolower(region))
+country_choropleth(map_me,zoom=na.omit(map_me$region),num_colors=4)
+```
+
+This isn't the best-looking map, but it's probably the easiest to make. Most importantly, it clearly shows how the high-poverty countries (according to the scaled metric) are clustered in Central America and Haiti.
+
+In addition to making maps, we can use statistical tests to see which countries have significantly higher poverty than the rest of the region.
+
+```{r test1}
+geo_poverty$pval <- sapply(1:nrow(geo_poverty),function(i) {
+  x <- c(geo_poverty$poor_sum[i],
+         sum(geo_poverty$poor_sum)-geo_poverty$poor_sum[i])
+  n <- c(geo_poverty$n[i],sum(geo_poverty$n)-geo_poverty$n[i])
+  pt <- prop.test(x=x,n=n,alternative='greater')
+  pt$p.value*nrow(geo_poverty) # correct for multiple hypotheses
+})
+arrange(geo_poverty,pval) %>% select(country_name,poor_mean,pval) %>% 
+  head(10) %>% kable
+```
+
+The statistical results agree with the map; several countries in Central America (plus Haiti and Guyana) are significantly poorer at a level of p < 0.01.
+
+
+What about our unscaled poverty metric?
+
+```{r map2, warning=FALSE}
+geo_poverty %>%
+  select(country_name,poor2_mean) %>%
+  dplyr::rename(region=country_name,value=poor2_mean) %>%
+  filter(!(region %in% c('Bahamas','Barbados'))) %>%
+  mutate(region=tolower(region)) %>%
+  country_choropleth(zoom=na.omit(map_me$region),num_colors=4)
+```
+
+Despite the differences between our two measures of poverty, their geographic distributions look fairly similar.
+
+```{r test2}
+geo_poverty$pval2 <- sapply(1:nrow(geo_poverty),function(i) {
+  x <- c(geo_poverty$poor2_sum[i],
+         sum(geo_poverty$poor2_sum)-geo_poverty$poor2_sum[i])
+  n <- c(geo_poverty$n[i],sum(geo_poverty$n)-geo_poverty$n[i])
+  pt <- prop.test(x=x,n=n,alternative='greater')
+  pt$p.value*nrow(geo_poverty) # correct for multiple hypotheses
+})
+arrange(geo_poverty,pval2) %>% select(country_name,poor2_mean,pval2) %>% 
+  head(10) %>% kable
+```
+
+The statistical analysis shows some subtle differences between the two poverty measures. Jamaica, Panama, and Barbados join the ranks of the significantly-poor, while Nicaragua, El Salvador, and Guyana no longer seem so poor by this metric.
+
+## Histograms
+
+For numeric variables with lots of values, histograms can provide a useful visualization of how those values are distributed. For example, the largest absolute number of responses come from people in their early 20s, while ages of respondants range from 16 to 101.
+
+``` {r age}
+ggplot(w_imp,aes(x=q2)) +
+  geom_histogram(binwidth=1,
+                 fill='cornflowerblue',color='gray20') +
+  xlab('Age') + ylab('Count')
+```
+
+Years of schooling follow an odd-looking distribution, with strong peaks at 6 and 11-12 years. Presumably these are people who stopped after completing either their primary or their secondary education; stopping in the middle of one of those phases was less common.
+
+```{r edu}
+ggplot(w_imp,aes(x=ed)) +
+  geom_histogram(binwidth=1,
+                 fill='cornflowerblue',color='gray20') +
+  xlab('Years of schooling') + ylab('Count')
+```
+
+Nearly half of respondants had two or fewer children, while a few households reported as many as 25.
+
+``` {r kids}
+ggplot(w_imp,aes(x=q12)) +
+  geom_histogram(binwidth=1,
+                 fill='cornflowerblue',color='gray20') +
+  xlab('# of children') + ylab('Count')
+```
+
+When asked instead about the number of people living in their households, the distribution is even more skewed:
+
+``` {r household}
+ggplot(w_imp,aes(x=q12c)) +
+  geom_histogram(binwidth=1,
+                 fill='cornflowerblue',color='gray20') +
+  xlab('# of people in household') + ylab('Count')
+```
+
+The peak at four household members (compared to the peak with no children) suggests that many family structures are more complex than nuclear families with two parents and a few children. At the other end of the spectrum, one respondant reported having 72 people in the household. One wonders if they were using the word "household" in the same way that others were, or if there may have been a misunderstanding about the question or the answer.
+
+## Exploring correlations
+
+We have a lot of variables in our dataset, and it will be informative to see which are correlated or anticorrelated with each other. This will be a little bit complicated for our factor variables -- instead of just asking what `pais` (country) correlates with, we'll need to do that individual for each possible response. So `pais == 1` (Mexico) will likely have a different set of correlations than `pais == 23` (Jamaica).
+
+First, let's take the easiest case and get correlations between the scale variables. We'll collect all of our pairwise correlations in a data frame called `cors`.
+
+```{r cor1}
+scale_vars <- which(sapply(w_imp,is.numeric))
+cors <- data.frame()
+# First, correlate scale variables with each other
+for (i in 1:(length(scale_vars)-1)) {
+  ni <- names(w_imp)[scale_vars[i]]
+  for (j in (i+1):length(scale_vars)) {
+    nj <- names(w_imp)[scale_vars[j]]
+    c <- cor(w_imp[scale_vars[i]],w_imp[scale_vars[j]]) %>% as.numeric
+    addme <- data.frame(var1=ni,var2=nj,val=c,row.names=NULL)
+    cors <- rbind(cors,addme)
+  }
+}
+```
+
+Next, we'll add the correlations between scale and factor variables. For factors with only two levels we only need to do this once, since correlations with the two levels will be mirror images of each other.
+
+``` {r cor2}
+factor_vars <- c(which(sapply(w_imp,is.factor)),which(sapply(w_imp,is.logical)))
+# ignore factors that still have a ton of levels
+factor_vars <- factor_vars[!(names(factor_vars) %in% c('prov','municipio'))]
+for (i in 1:length(scale_vars)) {
+  ni <- names(w_imp)[scale_vars[i]]
+  for (j in 1:length(factor_vars)) {
+    tmp <- w_imp[,factor_vars[j]] %>% as.data.frame
+    names(tmp) <- paste0(names(w_imp)[factor_vars[j]],'_')
+    mm <- model.matrix(~ .+0, data=tmp) %>%
+      as.data.frame()   
+    if (ncol(mm)==2) { mm <- mm %>% select(1)}
+    for (k in 1:ncol(mm)) {
+      nk <- names(mm)[k]
+      c <- cor(w_imp[scale_vars[i]],mm[k]) %>% as.numeric
+      addme <- data.frame(var1=ni,var2=nk,val=c,row.names=NULL)
+      cors <- rbind(cors,addme)
+    }
+  }
+}
+```
+ 
+Finally, the correlations between different factor variables. Note that we'll never be looking at correlations between two levels of the same factor variable, because those will always be anticorrelated.
+
+```{r cor3}
+for (i in 1:(length(factor_vars)-1)) {
+  tmp <- w_imp[,factor_vars[i]] %>% as.data.frame
+  names(tmp) <- paste0(names(w_imp)[factor_vars[i]],'_')
+  mm_i <- model.matrix(~ .+0, data=tmp) %>%
+    as.data.frame()
+  if (ncol(mm_i)==2) { mm_i <- mm_i %>% select(1)}
+  for (j in (i+1):length(factor_vars)) {
+    tmp <- w_imp[,factor_vars[j]] %>% as.data.frame
+    names(tmp) <- paste0(names(w_imp)[factor_vars[j]],'_')
+    mm_j <- model.matrix(~ .+0, data=tmp) %>%
+      as.data.frame() 
+    if (ncol(mm_j)==2) { mm_j <- mm_j %>% select(1)}
+    for (mi in 1:ncol(mm_i)) {
+      ni <- names(mm_i)[mi]
+      for (mj in 1:ncol(mm_j)) {
+        nj <- names(mm_j)[mj]
+        c <- cor(mm_i[mi],mm_j[mj]) %>% as.numeric
+        addme <- data.frame(var1=ni,var2=nj,val=c,row.names=NULL)
+        cors <- rbind(cors,addme)
+      }
+    }
+  }
+}
+```
+
+Now our data frame `cors` contains `r nrow(cors)` different correlations. This will be too much to visualize all at once, so we'll filter it down just to the strongest 1% of correlations.
+
+```{r strong}
+fraction <- 0.01
+cutoff <- quantile(abs(cors$val),1-fraction)
+strong <- cors %>% 
+  filter(abs(val) > cutoff) 
+
+qgraph(strong,theme='classic',asize=0)
+```
+
+This plot shows the strongest correlations between variables in our dataset. Unfortunately, the longer variable names are written in a really tiny font and might be hard to read. Positive correlations (i.e. variables that tend to move in the same direction) are indicated by green lines. For example, there is a tightly-connected cluster in the upper right with edges between governance-related questions such as `b1` (Courts guarantee fair trial), `b3` (Basic rights are protected), and `n15` (Evaluation of Administration's Handling of Economy). Evidently, people's opinion of different aspects of governance tend to correlate. 
+
+Negative correlations (where one variable increases when another decreases) are shown by red arrows. For example, there is a strong negative correlation between www1 (Internet usage) and our scaled wealth index. (Note that large values of `www1` indicate _infrequent_ internet use.) Importantly, our target variables (`w_scaled` and `w_unscaled`, toward the lower right) are part of a wide-ranging set of correlations that touch on education (`ed`), number of children (`q12`), ethnicity (`etid_black`, `etid_white`), geography (`pais_22`=Haiti, `pais_23`=Jamaica), and an urban-rural split (`ur_1`=Urban, `tamano_5`=Rural Area, and `tamano_1`=National Capital).
+
+## Dimensionality reduction
+
+The presence of many strong correlations raises the question of whether we can reduce the dimensionality of this dataset using principal components analysis. We'll omit our wealth-related variables so that our PCA results can still be used to predict them. We'll also omit our highly-diverse factor variables `prov` and `municipio`. We'll use the `model.matrix` function to convert multi-level factor variables into a set of binary variables.
+
+``` {r pca}
+x <- w_imp %>% select(-prov,-municipio,-w_unscaled,-w_scaled,-poor_unscaled,-poor_scaled)
+pca <- model.matrix(~ ., data=x) %>%
+  as.data.frame() %>%
+  select(-`(Intercept)`) %>%
+  prcomp(center=TRUE,scale=TRUE)
+cum_var <- data.frame(pc=1:length(pca$sdev),
+                      cv=summary(pca)$importance[3,])
+cutoff <- 0.9
+top_pc <- cum_var %>% filter(cv > cutoff) %>% select(pc) %>% min
+ggplot(cum_var,aes(x=pc,y=cv)) +
+  geom_point(size=2,color='tomato') +
+  geom_vline(xintercept=top_pc,color='steelblue4')
+```
+
+This is a rather diverse set of variables; it takes `r top_pc` to capture `r paste0(cutoff*100,'%')` of the variance. Even if we can't reduce the overall size of our dataset, PCA is still handy because it allows us to represent all of our data by numeric variables with comparable units, which can be useful for some ML methods. Let's save this to a CSV file for future use.
+
+``` {r}
+pca$x %>% as.data.frame %>% 
+  cbind(w_imp %>% select(prov,municipio,w_unscaled,w_scaled,poor_unscaled,poor_scaled)) %>%
+  write.csv('pca.csv',row.names=FALSE)
+```
+
+It can also be useful to look at a scatterplot of the first two principal components. Even if they don't contain a large fraction of the variance, this can be a good way to check for nonlinear correlations or obvious clustering. PCA misses nonlinear correlations, but these can show up as banana-shaped scatterplots; clustering produces grapes instead.
+
+```{r scatter}
+pca$x %>% as.data.frame %>% 
+  select(PC1,PC2) %>%
+  ggplot(aes(x=PC1,y=PC2)) +
+    geom_point(size=2,alpha=0.1,color='olivedrab')
+```
+
+## Clustering
+
+In addition to visual inspection, there are more quantitative ways to see whether our data separate out into meaningful clusters of similar households. We'll use a method called k-means clustering, which separates the data into _k_ groups such that members of the same group are more similar to each other than they are to households outside the group. One difficulty here is that we have to specify a value of _k_ in advance. One common practice is to look at the fraction of the variance explained by between-cluster variation for different values of _k_. Typically, this will increase rapidly at first and then show an "elbow" where adding more clusters doesn't help explain any more variance.
+
+``` {r kmeans, warning=FALSE}
+maxc <- 50
+clust_var <- sapply(1:maxc,function(k) {
+  km <- kmeans(pca$x,k)
+  #paste(k,km$betweenss/km$totss) %>% print
+  km$betweenss / km$totss
+})
+data.frame(k=1:maxc,v=clust_var) %>%
+  ggplot(aes(x=k,y=v)) +
+  geom_point(size=2,color='goldenrod3') +
+  geom_line(color='goldenrod3') +
+  xlab('Number of clusters') + ylab('Between-cluster variance')
+```
+
+Unfortunately, this is a case where identifying the "elbow" is rather subjective. If we choose k=16, then we're able to explain about 20% of the total variance in terms of cluster membership. We can also explain 20% of the total variance with just the first 6 principal components. 
+
+There's more to this story, however. If we look at just a few principal components, we're effectively "projecting" our data into a smaller number of dimensions. A simple way to picture this is to think of a two-dimensional shadow being cast by a three-dimensional object. It's easy to think of a situation where objects that are clearly separated in three dimensons cast two dimensional shadows that overlap, making them look like a single object. The same thing can happen in higher dimensions -- we miss out on structure if we include too few dimensions. There are also times when including too many dimensions can also be problematic. Because most of the variance is captured in low-numbered principal components, the higher-numbered ones may contain more irrelevant noise.
+
+We can visualize this behavior by keeping the number of clusters fixed and varying the number of principal components included:
+
+``` {r fixk2, warning=FALSE}
+k <- 16
+cols_var <- sapply(1:ncol(pca$x),function(i) {
+  km <- kmeans(pca$x[,1:i],k)
+  #paste(i,km$betweenss/km$totss) %>% print
+  km$betweenss / km$totss
+})
+data.frame(k=1:length(cols_var),v=cols_var) %>%
+  ggplot(aes(x=k,y=v)) +
+  geom_point(size=2,color='darkorchid2') +
+  geom_line(color='darkorchid2') +
+  xlab('Number of PCs') + ylab('Between-cluster variance')
+```
+
+What we're seeing here is that 16 clusters are able to capture a rather large fraction of the variance when we're looking at just a few principal components and much less when we're looking at all of them.
+
+What this doesn't give us is a sense of the _significance_ of clustering. Clustering algorithms will find clusters, even if the data itself doesn't contain any significantly clustered structure. To see whether structure is real, we'll need to compare clustering results to a synthetic dataset where we know that no clustering exists. We can do this by creating a data frame (`fake`) which has the same number of rows and columns as our real data (`w_imp`), and matches the variance in each column. The difference is that the numbers in `fake` are random draws from Gaussian distributions; there shouldn't be any real clusters in there.
+
+This time, we'll iterate over cluster sizes (`k`) as well as over the number of principal components included (`i`). Note that `i` and `k` here are examples of _hyperparameters_ -- things that the algorithm itself doesn't learn, but that influence the final model by telling the algorithm _how_ to go about learning something.
+
+```{r sigclust}
+# NOTE: This will probably take several hours. To spare myself calculating this over and over,
+# I saved the result to a file and will just load it here.
+# best <- 0
+# print('i,k,f_real,f_fake')
+# plotme <- data.frame()
+# for (k in 1:32) {
+#   for (i in 1:ncol(pca$x)) {
+#     km_real <- kmeans(pca$x[,1:i],k)
+#     f_real <- km_real$betweenss / km_real$totss
+#     km_fake <- kmeans(fake[,1:i],k)
+#     f_fake <- km_fake$betweenss / km_fake$totss
+#     d <- f_real - f_fake
+#     plotme <- rbind(plotme,data.frame(k=k,i=i,d=d))
+#     if (d > best) {
+#       best <- d
+#       paste(i,k,f_real,f_fake) %>% print
+#     }
+#   }
+# }
+# save(plotme,file='plotme.rda')
+
+load('plotme.rda')
+ggplot(plotme,aes(x=i,y=k)) +
+  geom_tile(aes(fill=d)) +
+  scale_fill_gradient(low='white',high='steelblue') +
+  xlab('Number of PCs') + ylab('Number of clusters') +
+  theme_classic()
+```
+
+In this plot, the combinations of cluster size and number of PCs that shows a significant increase in between-cluster variance over the synthetic data are shown in blue. Roughly speaking, in the blue areas the algorithm is telling us something useful about the data, and in the white areas it probably isn't. We can learn a few things right away:
+
+- For a very small number of PCs (less than about 10), we don't really have enough information for k-means to perform all that well. We'll have to see whether this pattern also holds true when we train ML models on the PCA-transformed data.
+
+- In general, if you want to describe a larger number of PCs with some degree of significance, you need more clusters. Conversely, you need more clusters (i.e. more information) to outperform the random sampling on a large number of variables.
+
+- This isn't going to give us the "right" answer in terms of how many clusters we should want. As we could suspect from earlier, there isn't really a natural number of clusters that jumps out as being the best choice. If we want something that we can use as a factor variable for ML, we should keep it fairly small. On the other hand, if our goal is to pick out a bunch of (fairly homogeneous) small clusters and focus on the ones that fit some criteria (such as high poverty), then we could get away with a larger number of clusters that capture more of the overall variance.
+
+We can simplify things a bit by looking at the best performance as a function of `k`:
+
+```{r bestk}
+plotme %>% 
+  group_by(k) %>%
+  summarize(d=max(d)) %>%
+  ggplot(aes(x=k,y=d)) +
+    geom_point(size=2,color='steelblue') +
+    geom_line(color='steelblue') +
+    xlab('Number of clusters') + ylab('Best improvement over random') +
+    theme_classic()
+```
+
+Again, this is a little subjective, but it seems like we start to see diminishing returns after about k=10. How many principal components should we use when k=10?
+
+```{r}
+plotme %>% filter(k==10) %>% arrange(desc(d)) %>% head %>% kable
+```
+
+Looks like 11 principal components is our best bet. It's a good sign that we get similar-looking performance if the hyperparameter `i` (number of PCs) is varied slightly. This is referred to as model stability, and it makes optimization a lot easier.
+
+```{r, warning=FALSE}
+k10 <- kmeans(pca$x[,1:11],10)
+w_imp$clust <- as.factor(k10$cluster)
+```
+
+Do these clusters have anything to do with poverty?
+
+```{r}
+ggplot(w_imp,aes(x=clust,y=w_scaled)) +
+  geom_boxplot()
+```
+
+Although we explicitly excluded wealth information when building our clusters, at least some show a correlation. In particular, clusters 1 and 9 are significantly poorer than the average, while clusters 2 and 7 are significantly richer. If inclined, we could drill in deeper to try and understand what makes each cluster different from the rest of the population. This would essentially be a reprise of what this tutorial is doing -- we would choose cluster membership as a binary variable, try to find a model that can predict cluster membership based on other variables, and then try to explain this model.
+
+Note that, if we want to use k-means clustering in actual model building, we should *not* use the labels we've calculated here as features. When we're training models, we'll want to evaluate them by holding out part of the data and using it to test the accuracy of our predictions. This means that when we're adding new attributes to our data (known as feature engineering), we'll want to make sure that those attributes are based only on the _training_ data, and never on the _test_ data. If the test data informs the trained model in any way, you're cheating and your final model probably won't work very well.
+
