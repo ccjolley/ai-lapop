@@ -1,0 +1,221 @@
+---
+title: 'Part 4: Logistic regression'
+author: "Craig Jolley"
+date: "December 20, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+People are sometimes suprised when I mention generalized linear regression models as a machine learning tool. Maybe they just don't seem exotic enough. For classification problems like this one, however, logistic regression is always a good place to start.
+
+As before, we'll start by loading packages and data:
+
+```{r load_data, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(glmnet)
+library(knitr)
+load('w_imp.rda')
+set.seed(12345)
+```
+
+We'll start by looking at just the scaled poverty metric, and then repeat with the unscaled one.
+
+```{r vars}
+x <- w_imp %>%
+  select(-prov,-municipio,-w_unscaled,-w_scaled,-poor_unscaled,-poor_scaled)
+
+d_scaled <- w_imp %>% select(poor_scaled) %>% 
+  rename(y=poor_scaled) %>% cbind(x)
+d_unscaled <- w_imp %>% select(poor_unscaled) %>% 
+  rename(y=poor_unscaled) %>% cbind(x)
+```
+
+## Simple regression model
+
+This is the simplest way to construct a linear regression, attempting to use all other variables in the dataset to predict `poor_scaled`:
+
+```{r reg1, warning=FALSE}
+regplot <- function(d,title) {
+  reg1 <- glm(y ~ .,family=binomial(link='logit'),data=d)
+  regplot1 <- data.frame(est=summary(reg1)$coefficients[2:119,1],
+                         log_p=log10(summary(reg1)$coefficients[2:119,4]),
+                         name=row.names(summary(reg1)$coefficients)[2:119]) %>%
+    mutate(sig=(log_p < -2),
+           label=ifelse(log_p < -25,as.character(name),NA)) 
+  
+  ggplot(regplot1,aes(x=log_p,y=est,color=sig)) +
+    geom_point(size=2) +
+    xlab('log(p-value)') + ylab('Model weight') + 
+    geom_text(aes(label=label),color='black',vjust=1) +
+    ggtitle(title)
+}
+regplot(d_scaled,'Scaled poverty measure')
+```
+
+This plot shows all of the variables included in the regression, with the logarithm of the p-value on the x-axis and the model weight on the y-axis. For variables further to the left, our confidence in their impact on the model is higher. Points shown in blue (sig==TRUE) are considered statistically significant (p < 0.01), while the red points are not statistically significant. The vertical position of points indicates the strength of their influence -- `pais15` is both high-confidence and high-influence, while `ed` has high confidence but a relatively lower degree of influence.
+The highest-confidence correlations with our scaled poverty measure are:
+
+- `pais15` = Haiti
+- `ed` = Education level
+- `gi0` = Frequency of paying attention to news (higher=less attention)
+- `www1` = Internet usage
+- `pais5` = Nicaragua
+- `q10d4` = family economic situation described as "not enough and having a hard time"
+- `etid3` = black
+- `pais17` = Guyana
+- `q2` = age
+- `pais4` = Honduras
+- `q12c` = Number of people in household
+
+Some of these look familiar from the exploratory data analysis. These high-ranking variables don't tell the whole story; they do tell us that an uneducated young Haitian who lives alone and never reads the news or uses the internet is more likely than the average Latin American to be poor.
+
+How different are things with our unscaled poverty measure?
+
+```{r reg2, warning=FALSE}
+regplot(d_unscaled,'Unscaled poverty measure')
+```
+
+Not surprisingly, we see some of the same significant variables as before, along with a few newcomers:
+
+- `ocup4a3` = Employment status: Actively looking for a job
+- `ocup4a4` = Employment status: Student
+- `ocup4a7` = Employment status: Not employed and not looking for a job
+- `q10e3` = Household income over the last two years has decreased
+- `pais7` = Panama
+
+Our scaled poverty metric emphasized assets, while the unscaled metric emphasizes income. This fits with the observation that variables related directly to employment and household income are more prominent. In addition, geographic effects seem to be less important, probably because scaling of the income variable for different currencies eliminates a lot of the fixed differences between countries. It is possible (though we haven't proven it yet) that the unscaled metric is more sensitive to within-country variation and the scaled metric to between-country variation.
+
+## Error metrics
+
+In traditional parametric statistics, the analysis might stop here. Statisticians aim to fit a model to data, estimate values of that model's parameters, and interpret the meaning of the significant parameters. In machine learning, we are more concerned with "data-space" evaluation than with "parameter-space" evaluation. This means that we want to know how well the model actually fits the data. We'll do this by making predictions and then comparing those predictions to the quantity we were trying to predict.
+
+We'll use two different methods to evaluate how well this model works. The first is _accuracy_, in which we divide the number of correct predictions by the number of total predictions. This definition of accuracy assumes that we care the same amount about false positives (saying a household is poor when they are not) and false negatives (failing to identify a poor household). This isn't always true, and we'll need to use other metrics if it isn't.
+
+The predictions returned by logistic regression are not actually predictions of whether the binary variable `poor_scaled` (or `poor_unscaled`) takes a true or a false value. They are the _probability_ of a true prediction. This means that we'll need to choose a cutoff probablility above which we'll be willing to claim a positive prediction. Because we're not weighting false positives or negatives as more important, we'll choose a cutoff of 0.5.
+
+```{r}
+reg1 <- glm(y ~ .,family=binomial(link='logit'),data=d_scaled)
+pred1 <- predict(reg1,type='response')
+acc <- sum(d_scaled$y == (pred1 >= 0.5)) / nrow(d_scaled)
+acc
+```
+
+To put this result in context, we need to keep in mind that we defined our binary poverty variable such that about 10% of households would qualify. This means that if we just predicted that _no one_ was poor, we'd have an accuracy of 90%. Our model is a modest improvement on this.
+
+The other error metric we'll be interested in is log-loss. Rather that using a cutoff to convert our probabilistic predictions into binary ones, log-loss works directly with the probabilities. Log-loss has roots in information theory,
+and estimates the amount of information that is lost by using our predictions instead of the true value.
+
+```{r}
+logloss <- function(p,y) {
+  -mean(y*log2(p)) - mean((1-y)*log2(1-p))
+}
+logloss(pred1,d_scaled$y)
+```
+
+This number is a little harder to interpret without having others we can compare it with. We could try what we did last time and see what happens if we predict zero poverty, but we end up with an infinite result if we try to take the logarithm of a zero probability. Instead, we'll just use the minimum value of `pred1` to denote an almost-zero probability.
+
+```{r}
+logloss(min(pred1),d_scaled$y)
+```
+
+This metric shows a larger difference between our model and a naive uniform prediction.
+
+## Cross-validation
+
+Our model evaluation thus far has a problem. The true performance of a machine learning model can only be judged using out-of-sample data. In other words, we need to test the model using different data than were used to train it. With a dataset of fixed size, we can do this by training the model on 90% of the data and testing it on the remaining 10%. If we repeat this train-test split with diffrent random samples of the data, then we can get more confident predictions of accuracy and establish confidence intervals.
+
+```{r xval1, warning=FALSE}
+reg_xval <- function(d,niter=10) {
+  plyr::ldply(1:niter,function(i) {
+    s <- runif(nrow(d)) > 0.1
+    train <- d[s,]
+    test <- d[!s,]
+    reg_i <- glm(y ~ .,family=binomial(link='logit'),data=train)
+    pred_i <- predict(reg_i,newdata=test,type='response')
+    acc <- sum(test$y == (pred_i >= 0.5)) / nrow(test)
+    ll <- logloss(pred_i,test$y)
+    data.frame(acc=acc,ll=ll)
+  })
+}
+logregs <- reg_xval(d_scaled)
+```
+
+In order to compare this model with the others we'll develop, we can compile the results into a data frame.
+
+```{r newrow}
+newrow <- function(d,label,scaled) {
+  tt_acc <- t.test(d$acc)
+  tt_ll <- t.test(d$ll)
+  data.frame(label=label,scaled=scaled,
+             acc_mean=mean(d$acc),
+             acc_lo=tt_acc$conf.int[1],
+             acc_hi=tt_acc$conf.int[2],
+             ll_mean=mean(d$ll),
+             ll_lo=tt_ll$conf.int[1],
+             ll_hi=tt_ll$conf.int[2])
+}
+results <- newrow(logregs,'Logistic regression',TRUE)
+results %>% kable
+```
+
+We can compare this to our results without cross-validation, which gave us an accuracy of `r acc` and a log-loss of `r logloss(pred1,d_scaled$y)`. According to both metrics, the average performance in cross-validation is slightly lower (as we would expect).
+
+While we're at it, we can do the same thing for our unscaled metric.
+
+```{r xval2, warning=FALSE}
+results <- results %>%
+  rbind(newrow(reg_xval(d_unscaled),'Logistic regression',FALSE))
+```
+
+## LASSO regression
+
+Another variation of regression comes from regularization. Regularization tries to optimize two things at the same time -- fitting the data as well as possible, while also trying to keep model weights small. In the case of LASSO [Least Absolute Shrinkage and Selection Operator], regularization tends to push model weights to zero, leaving us with a more parsimonious model that eliminates some variables. This leads to models that are simpler to understand, but may suffer from a performance tradeoff.
+
+LASSO involves a parameter called lambda that controls the relative balance between optimizing fit and constraining model weights. The non-LASSO example above is equivalent to lambda=0, where weights are not constrained at all. The function `cv.glmnet` gives us an automated way to find the appropriate value of lambda
+using cross-validation.
+
+```{r glmnet1}
+mm <- model.matrix(y~.,d_scaled)
+y <- as.numeric(d_scaled$y)
+cv1 <- cv.glmnet(mm,y,alpha=1,family='binomial',type.measure='class')
+plot(cv1)
+```
+
+This plot shows the logarithm of lambda and the misclassification error. As lambda increases (moving to the right), the error also increases but the model becomes simpler. The vertical dashed lines mark the minimum error (for a very small lambda), and the value of lambda that is one standard deviation above this minimum. We'll take this one-SD point as a reasonable balance between accuracy and simplicity. The numbers across the top of the plot show the number of variables with non-zero coefficients -- we've nearly cut the complexity of our model in half.
+
+```{r lasso}
+lasso_xval <- function(d,niter=10) {
+  plyr::ldply(1:niter,function(i) {
+    #paste(i,Sys.time()) %>% print
+    s <- runif(nrow(d)) > 0.1
+    train <- d[s,]
+    test <- d[!s,]
+    train_mm <- model.matrix(y~.,train)
+    y <- as.numeric(train$y)
+    cv_i <- cv.glmnet(train_mm,y,alpha=1,family='binomial',type.measure='class')
+    test_mm <- model.matrix(y~.,test)
+    pred_i <- predict(cv_i,newx=test_mm,type='response')
+    acc <- sum(test$y == (pred_i >= 0.5)) / nrow(test)
+    ll <- logloss(pred_i,test$y)
+    data.frame(acc=acc,ll=ll)
+  })
+}
+results <- results %>%
+  rbind(newrow(lasso_xval(d_scaled),'LASSO regression',TRUE)) %>%
+  rbind(newrow(lasso_xval(d_unscaled),'LASSO regression',FALSE))
+results %>% kable
+```
+
+For the scaled poverty variable, the difference between the plain logistic regression and the LASSO regression isn't statistically significant.  While the LASSO model is simpler, it's still fairly complex, and a model with 66 non-zero weights might still not be very interpretable.
+
+Our unscaled wealth index seems to be harder to predict than the scaled one, with the accuracy of the logistic regression not really beating the naive accuracy of 0.9.
+
+``` {r wrapup}
+write.csv(results,'results.csv',row.names=FALSE)
+```
