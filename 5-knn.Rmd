@@ -1,0 +1,254 @@
+---
+title: "Part 5: k-nearest neighbors"
+author: "Craig Jolley"
+date: "December 28, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The k-nearest neighbors (KNN) model is a good model to try early in the process, because it's so simple. First, you pick a number _k_. For each instance where you want to make a prediction, you find the _k_ points in your training data that are closest to it. The predicted value is based on the average of the neighbors. All of the neighbors have value of either 0 (not-poor) or 1 (poor), so the prediction can be interpreted as the probability of being classified poor.
+
+This requires variables that can be interpreted in a way that provides a measurable distance -- qualitative variables like ethnicity and religion won't do the trick as-is. This is the same situation we ran into when trying to find clusters in exploratory data analysis [link], and we'll address it the same way: by using principal components analysis to get a set of continuous-valued variables with a common scale. We can then just measure distance using the (default) Euclidean norm.
+
+Another interesting thing about KNN is that it is an extreme case of how a model can be inseperable from the data used to train it. In traditional statistical analysis, one uses data to infer parameters of a model, then makes future predictions based on those parameters. In KNN there are no parameters at all -- the model consists of looking up rows in the training dataset and averaging them.
+
+As before, we'll start by loading packages and data:
+
+```{r setup2, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(FNN)
+library(knitr)
+set.seed(12345)
+
+load('w_imp.rda')
+x <- w_imp %>%
+  select(-prov,-municipio,-w_unscaled,-w_scaled,-poor_unscaled,-poor_scaled)
+d_scaled <- w_imp %>% select(poor_scaled) %>% 
+  rename(y=poor_scaled) %>% cbind(x)
+d_unscaled <- w_imp %>% select(poor_unscaled) %>% 
+  rename(y=poor_unscaled) %>% cbind(x)
+```
+
+This helper function for calculating the log-loss is almost the same as last time. Unlike logistic regression, KNN often assigns probablities of 1 or 0, when the neighbors are unanimous in their assessment. We need to add a parameter `epsilon` that ensures that we never calculate a logarithm of zero. I chose a default value of 0.01 for `epsilon` -- this is sort of arbitrary. 
+
+```{r ll}
+logloss <- function(p,y,epsilon=0.01) {
+  p[p==0] <- epsilon
+  p[p==1] <- 1-epsilon
+  -mean(y*log2(p)) - mean((1-y)*log2(1-p))
+}
+```
+
+## Cross-validation and feature engineering
+
+As before, we'll define a core cross-validation function that does most of the work. This is a little more complicated than previous examples, because we're moving principal components analysis inside the cross-validation loop. The reason is that we want to simulate a situation where we're making predictions on data that we've really never seen before. If those test data are used as part of the PCA calculation, then we're using some information about the test data to create our model. This can lead to inflated accuracy estimates and eventual sadness.
+
+```{r cvfun}
+knn_cv <- function(d,k,i,niter=10) {
+  plyr::ldply(1:niter,function(j) {
+    s <- runif(nrow(d)) > 0.1
+    # prepare training data
+    train <- d[s,] %>% select(-y)
+    train_pca <- model.matrix(~ ., data=train) %>%
+      as.data.frame() %>%
+      select(-`(Intercept)`) %>%
+      prcomp(center=TRUE,scale=TRUE)
+    train_cl <- d$y[s]
+    # prepare test data
+    test <- d[!s,]  %>% select(-y)
+    test_pca <- model.matrix(~ ., data=test) %>%
+      as.data.frame() %>%
+      select(-`(Intercept)`) %>%
+      predict(train_pca,newdata=.)
+    test_cl <- d$y[!s]
+    # train model
+    knn_i <- knn.reg(train=train_pca$x[,1:i],
+                     test=test_pca[,1:i],
+                     y=train_cl,k=k)
+    acc <- sum(test_cl == (knn_i$pred >= 0.5)) / nrow(test)
+    ll <- logloss(knn_i$pred,test_cl)
+    data.frame(acc=acc,ll=ll)
+  })
+}
+```
+
+## Hyperparameter tuning
+
+We have two hyperparameters to think about. First, there's the number of neighbors `k`. Since we're working with PCA results, we can also tune the number of principal components `i`. As was the case with clustering, we should expect our performance to deteriorate if `i` is too high or too low.
+
+As a first guess, let's hold `i` (number of PCs) fixed at 12 and vary `k`:
+
+```{r varyk}
+k <- 12
+nsamples <- 50
+# This takes a long time, so I saved the result from the first time
+# tune_k <- plyr::ldply(1:nsamples,function(k) {
+#   paste(k,Sys.time()) %>% print
+#   knn_cv(d_scaled,k,i=12,niter=1) %>%
+#     summarize(acc=mean(acc),ll=mean(ll))
+# })
+# save(tune_k,file='knn_tune_k.rda')
+load('knn_tune_k.rda')
+tune_k$k <- 1:nsamples
+ggplot(tune_k,aes(x=k,y=acc)) +
+  geom_point(size=2,color='indianred4') +
+  geom_line(color='indianred4') +
+  xlab('k') + ylab('Accuracy') 
+```
+
+With 12 PCs, we get fairly poor performance at low k and then stop seeing performance gains after about k=20. This curve would probably be a little smoother if we'd used more iterations in cross-validation, but we get the rough idea.
+
+Now let's hold `k` (number of neighbors) fixed at 20 and vary `i`:
+
+```{r varyi}
+max_i <- min(ncol(x),70)
+# This takes a long time, so I saved the result from the first time
+# tune_i <- plyr::ldply(2:max_i,function(i) {
+#   paste(i,Sys.time()) %>% print
+#   knn_cv(d_scaled,k=20,i=i,niter=1) %>%
+#     summarize(acc=mean(acc),ll=mean(ll))
+# })
+# save(tune_i,file='knn_tune_i.rda')
+load('knn_tune_i.rda')
+tune_i$i <- 2:max_i
+ggplot(tune_i,aes(x=i,y=acc)) +
+  geom_point(size=2,color='navyblue') +
+  geom_line(color='navyblue') +
+  xlab('i') + ylab('Accuracy') 
+```
+
+We could find the optimal combination of `k` and `i` by just trying out every possibility, but that woud take a really long time. A typical best practice for random hyperparameter searches is to try 60 parameter combinations. In general, that approach will get us within the top 5% of hyperparameter combinations, with 95% probability. This is true as long as the accuracy varies with our hyperparameters in a way that is fairly smooth -- if you're wandering randomly it's easier to wind up at the top of a hill than at the top of a flagpole.
+
+```{r rsearch1}
+rsearch <- function(d,nsamp,niter) {
+  hyper <- data.frame(k=sample.int(50,size=2*nsamp,replace=TRUE),
+                      i=sample.int(ncol(x)-1,size=2*nsamp,replace=TRUE)+1) %>%
+    unique %>%
+    head(nsamp)
+  plyr::ldply(1:nrow(hyper),function(j) {
+    i <- hyper[j,'i']
+    k <- hyper[j,'k']
+    ti <- Sys.time()
+    res <- knn_cv(d,k=k,i=i,niter=niter) %>%
+      summarize(k=k,i=i,acc=mean(acc),ll=mean(ll))
+    dt <- as.double(Sys.time()-ti,units='secs')
+    #paste(i,k,res$acc,round(dt,2)) %>% print
+    cbind(res,data.frame(dt=dt))
+  })
+}
+```
+
+We can do a quick run to estimate how long this will take. We'll use 5 different hyperparametr combinations (since calculations with low `k` and `i` will run faster) and just take one iteration of each.
+
+```{r quick}
+quick <- rsearch(d_scaled,5,1)
+```
+
+Of our 5 quick test runs, the average computation time was `r round(mean(quick$dt),2)` seconds. This means that if we want to sample 60 points with 5-fold cross-validation we're looking at roughly `r round(mean(quick$dt)*60*5/3600,2)` hours of calculation. This is probably right within an order of magnitude or so. We'll want to run this overnight and save the result for future use. 
+
+```{r rsearch2}
+# Uncomment these lines if you're doing this for the first time
+# t1 <- Sys.time()
+# h_scaled <- rsearch(d_scaled,60,5)
+# Sys.time()-t1
+# save(h_scaled,file='knn_hscaled.rda')
+# t2 <- Sys.time()
+# h_unscaled <- rsearch(d_unscaled,60,5)
+# Sys.time()-t2
+# save(h_unscaled,file='knn_hunscaled.rda')
+
+# Otherwise, run these lines instead
+load('knn_hscaled.rda')
+load('knn_hunscaled.rda')
+```
+
+Let's visualize our results:
+
+```{r viz1, message=FALSE, warning=FALSE}
+hyper_plot <- function(h) {
+  h %>%
+    mutate(acc=ifelse(acc >= 0.9,acc,NA)) %>%
+    ggplot(aes(x=i,y=k)) +
+      geom_point(size=5,aes(color=acc)) +
+      scale_color_gradientn(colors=rainbow(10)) +
+      xlab('Number of PCs (i)') + ylab('Number of neighbors (k)')
+}
+
+hyper_plot(h_scaled)
+```
+
+First, we filter out any cases where the KNN model performed worse than the worst-case naive model (accuracy < 90%) and display those in gray. That only appears to be a problem for small values of `k`. It looks like our best-performing examples are at fairly moderate values of both `k` and `i`. Rainbow color scales like this are generally frowned upon, but in this case it serves to highlight that values close to the maximum are spread out over a large part of our hyperparameter space. This is a good thing, because it means that our precise hyperparameter values won't matter very much, as long as we pick something in the broad purple-pink region.
+
+```{r table1, message=FALSE, warning=FALSE}
+h_scaled %>% arrange(desc(acc)) %>% head %>% kable
+```    
+
+This table shows the highest-accuracy hyperparameter combinations found. It lists `k` and `i`, along with the accuracy (`acc`), log-loss (`ll`), and time the time in seconds for one round of cross-validation (`dt`).
+
+```{r viz2}
+hyper_plot(h_unscaled)
+h_unscaled %>% arrange(desc(acc)) %>% head %>% kable
+```
+
+This is kind of a mess, and even the ones that beat 90% accuracy only barely make it. There's no visually-obvious pattern to the colors, which means that the KNN model built on the unscaled wealth variable probably doesn't have a well-defined maximum region the way that the scaled wealth variable does. We probably can't trust that we really have nearly-optimal hyperparameters, but that might just be because there aren't any optimal hyperparameters -- KNN just doesn't work well on this wealth index.
+
+## Final results and comparison
+
+For fair comparison with our regression models, we need to use our best combination of `k` and `i` for 10-fold cross validation:
+
+```{r results}
+newrow <- function(d,label,scaled) {
+  tt_acc <- t.test(d$acc)
+  tt_ll <- t.test(d$ll)
+  data.frame(label=label,scaled=scaled,
+             acc_mean=mean(d$acc),
+             acc_lo=tt_acc$conf.int[1],
+             acc_hi=tt_acc$conf.int[2],
+             ll_mean=mean(d$ll),
+             ll_lo=tt_ll$conf.int[1],
+             ll_hi=tt_ll$conf.int[2])
+}
+
+best_knn <- function(hparams,d,scaled) {
+  set.seed(12345)
+  hparams <- hparams %>% arrange(desc(acc))
+  k_best <- hparams[1,'k']
+  i_best <- hparams[1,'i']
+  final <- knn_cv(d,k_best,i_best,10)
+  label <- paste0('KNN: (k,i)=(',k_best,',',i_best,')')
+  newrow(final,label,scaled)
+}
+
+results <- read.csv('results.csv') %>%
+  rbind(best_knn(h_scaled,d_scaled,TRUE)) %>%
+  rbind(best_knn(h_unscaled,d_unscaled,FALSE)) 
+```
+
+How does KNN stack up for our scaled wealth index?
+
+```{r scaled}
+results %>% filter(scaled==TRUE) %>% arrange(desc(acc_mean)) %>% kable
+```
+
+With the scaled wealth index, KNN gets results that are significantly better than the naive 90% accuracy. It still doesn't outperform logistic regression, however.
+
+What about the unscaled index?
+
+```{r unscaled}
+results %>% filter(scaled==FALSE) %>% arrange(desc(acc_mean)) %>% kable
+```
+
+As was the case with logistic and LASSO regression, KNN doesn't significantly outperform the naive accuracy of 90% on the unscaled wealth index. It is starting to look like that index isn't something we're going to be able to predict well using the information we have. This is most likely a fault of the index itself -- it has high levels of noise and depends strongly on a variable that isn't defined very consistently across countries.
+
+Finally, we'll save our results for comparison with future models.
+
+```{r done}
+write.csv(results,'results.csv',row.names=FALSE)
+```
+
