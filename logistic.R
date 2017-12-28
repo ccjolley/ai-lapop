@@ -110,10 +110,10 @@ reg_xval <- function(d) {
     s <- runif(nrow(d)) > 0.1
     train <- d[s,]
     test <- d[!s,]
-    reg_i <- glm(poor_scaled ~ .,family=binomial(link='logit'),data=train)
+    reg_i <- glm(y ~ .,family=binomial(link='logit'),data=train)
     pred_i <- predict(reg_i,newdata=test,type='response')
-    acc <- sum(test$poor_scaled == (pred_i >= 0.5)) / nrow(test)
-    ll <- logloss(pred_i,test$poor_scaled)
+    acc <- sum(test$y == (pred_i >= 0.5)) / nrow(test)
+    ll <- logloss(pred_i,test$y)
     data.frame(acc=acc,ll=ll)
   })
 }
