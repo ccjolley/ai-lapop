@@ -1,0 +1,448 @@
+---
+title: "Part 6: Tree-based methods"
+author: "Craig Jolley"
+date: "December 29, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+After spending the last couple of sections on fairly simple ML methods, we'll now turn our attention to more state-of-the-art approaches. This section will focus on a few different tree-based approaches. The basic idea behind tree algorithms is simple: one decides how to classify a particular instance by answering a series of yes-no questions about it. The algorithm's job is to "grow" one or many decision trees, by finding the right questions to classify the training data. 
+
+Trees are ideally-suited to the type of data we're seeing in this application. While traditional regression methods are at home with normally-distributed numeric variables, factor variables are perfect for the binary decision-making offered by tree models.
+
+The tradeoff between accuracy and explainability that we see with other ML algorithms is apparent with tree-based models as well. Single decision trees are probably the most easily-interpretable models possible -- they ask a series of yes/no questions that can easily be checked and interpreted by a human. Unfortunately, they aren't terribly accurate. Ensemble-based methods such as random forests or gradient-boosted machines grow an ensemble of trees (through _bagging_ and _boosting_, which will get more explanation below) and make predictions by running an instance through many trees and averaging the result. While these methods are much more accurate, they sacrifice easy explainability. 
+
+As before, we'll start by loading packages and data:
+
+*TODO:* My version of ggrepel appears to be out of date.
+
+```{r setup2, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(rpart)
+library(randomForest)
+library(xgboost)
+library(knitr)
+set.seed(12345)
+
+load('w_imp.rda')
+
+x <- w_imp %>%
+  select(-prov,-municipio,-w_unscaled,-w_scaled,-poor_unscaled,-poor_scaled)
+
+d_scaled <- w_imp %>% select(poor_scaled) %>% 
+  rename(y=poor_scaled) %>% cbind(x)
+d_unscaled <- w_imp %>% select(poor_unscaled) %>% 
+  rename(y=poor_unscaled) %>% cbind(x)
+```
+
+## Single trees
+
+When growing a single decision tree, we first try to find the single variable that offers the best partition of our dataset into groups that are homogeneous with respect to our target variable. We then repeat that process for each subset, looking for optimal partitions. This continues recursively, until we can't make significant gains by adding more decision points to our tree. The results look something like this:
+
+```{r tree1}
+tree <- rpart(y~.,data=d_scaled,method='class')
+par(xpd=TRUE)
+plot.new()
+plot(tree,uniform=TRUE)
+text(tree,use.n=TRUE,fancy=TRUE,bg='olivedrab2')
+```
+
+In this plot, the decision points are shown as ovals and the final categorizations as rectangles. This plot can be a little bit confusing. For some reason, the `rpart` package re-classified our country (`pais') labels from numbers (which were already confusing) to letters. The split at the top of the tree sends all entries with a `pais` value of "o" to the right, and everything else to the left. "o" is the 15th letter in the alphabet, and the 15th label in our set of countries is 22, which corresponds to Haiti. So the first assumption our tree is making is that everyone who does not live in Haiti is not poor. This judgement was correct for 61,180 cases and incorrect for 4,795, as we can read from the "6.118e+04/4795" on the left-hand split.
+
+That doesn't mean that all Haitians were deemed poor. Those who never use the internet (`www1 >= 4.5`) were considered to be poor. Out of Haitians who do not use the internet, 1,364 actually were poor, and 340 were not. Among at least occasional internet users, those with less than 13.5 years of education (which seems like a lot) were deemed poor, while highly-educated, non-internet-using Haitians were considered not to be poor.
+
+This tree is easy to interpret and highlight some of the same important variables we saw in logistic regression and KNN. How good are these classifications? We can read the correct classifications directly off the tree:
+
+```{r tree2}
+(6.118e4 + 342 + 671 + 1364) / nrow(d_scaled)
+```
+
+This accuracy outperforms the naive expectation of 90%, but doesn't do as well as regression or KNN.
+
+How does our unscaled version look?
+
+```{r tree3}
+tree2 <- rpart(y~.,data=d_unscaled,method='class')
+summary(tree2)
+```
+
+In this case, the single-tree algorithm did not find any significant splits at all, and wasn't able to generate a tree.
+
+## Random forests
+
+As mentioned in the introduction, random forests generate a large number of decision trees and classify each instance by averaging the results obtained from many trees. This relies on a technique called _bagging_, which uses a finite dataset to approximate the true distribution by making random draws from it. Simply put, each tree in the forest is grown using a random subset of the data (rows), and partitions are made using only a random subset of the variables (columns). So, for example, if `pais` was not included in the set of columns for a particular tree, the top-level split would not single out Haiti as it does in the single tree, but would be made using a different variable. Similarly, if no poor Haitians were included in the data subset used to grow a certain tree, it might single out Hondurans or Nicaraguans instead.
+
+Note that the random forest algorithm we're using doesn't generate probabilities -- each prediction is a binary TRUE/FALSE decision. This means that we can't calculate log-losses the way we did with logistic regression and KNN; we'll have to rely solely on accuracy. It is possible to use random forests for regression, but this (at least with the `randomForest` package) is much slower.
+
+Most of the work will be done, as before, by a cross-validation function:
+
+```{r rf_xval}
+rf_xval <- function(d,niter=10,ntree=NULL,mtry=NULL,sampsize=NULL) {
+  sapply(1:niter,function(i) {
+    s <- runif(nrow(d)) > 0.1
+    train <- d[s,] %>% select(-y)
+    test <- d[!s,] %>% select(-y)
+    y <- as.factor(d$y)
+    train_y <- y[s]
+    test_y <- y[!s]
+    if (is.null(ntree)) {
+      rf_i <- randomForest(x=train,y=train_y,xtest=test,ytest=test_y)
+    } else {
+      rf_i <- randomForest(x=train,y=train_y,xtest=test,ytest=test_y,
+                           ntree=ntree,mtry=mtry,sampsize=sampsize)
+    }
+    mean(test_y == rf_i$test$predicted)
+  })
+}
+```
+
+Random forests have a few different hyperparameters we might want to tweak:
+- `ntree`: Number of trees grown (default=500)
+- `mtry`: Number of variables randomly sampled as candidates at each split. (default=`sqrt(ncol(x))`=`r floor(sqrt(ncol(x)))`)
+- sampsize = size of sample to draw (default = `nrow(x)`)
+
+```{r rsearch_rf}
+ntree_vals <- round(100*1.3^(0:9))
+mtry_vals <- 2*1:8
+sampsize_vals <- round(0.1*nrow(x)*1:8)
+
+rsearch_rf <- function(d,nsamp,niter) {
+  hyper <- data.frame(ntree=base::sample(ntree_vals,2*nsamp,replace=TRUE),
+                      mtry=base::sample(mtry_vals,2*nsamp,replace=TRUE),
+                      sampsize=base::sample(sampsize_vals,2*nsamp,replace=TRUE)) %>%
+    unique %>%
+    head(nsamp)
+  plyr::ldply(1:nrow(hyper),function(j) {
+    ntree <- hyper[j,'ntree']
+    mtry <- hyper[j,'mtry']
+    sampsize <- hyper[j,'sampsize']
+    ti <- Sys.time()
+    res <- rf_xval(d,niter=niter,ntree=ntree,mtry=mtry,sampsize=sampsize) %>% mean
+    dt <- as.double(Sys.time()-ti,units='secs')
+    paste(ntree,mtry,sampsize,res,round(dt,2)) %>% print
+    data.frame(ntree=ntree,mtry=mtry,sampsize=sampsize,
+               acc=res,dt=dt)
+  })
+}
+```
+
+To get a sense of how long this will take, we'll try just 5 random hyperparameter combinations.
+
+```{r quick}
+quick_rf <- rsearch_rf(d_scaled,5,1)
+```
+
+Based on this quick benchmarking, each iteration should take about `r round(mean(quick_rf$dt)/60,2)` minutes. That means that if we want 60 hyperparameter combinations with 5-fold cross validation of each one, then we're looking at `r round(mean(quick$dt)*60*5/3600,2)` hours of computation. We'll want to run this overnight and cache the results.
+
+*TODO:* Still need to retrieve h_unscaled from AWS.
+
+```{r hparams_rf}
+# Uncomment these rows if doing this for the first time
+# t1 <- Sys.time()
+# h_scaled_rf <- rsearch_rf(d_scaled,60,5)
+# t_scaled_rf <- Sys.time()-t1                 # finished in 8.82h on AWS
+# save(h_scaled_rf,file='rf_hscaled.rda')
+# t2 <- Sys.time()
+# h_unscaled_rf <- rsearch_rf(d_unscaled,60,5)
+# t_unscaled_rf <- Sys.time()-t2
+# save(h_unscaled_rf,file='rf_hunscaled.rda')
+
+# Once you've done this once, run these lines instead
+load('rf_hscaled.rda')
+load('rf_hunscaled.rda')
+```
+
+In the KNN example, we could easily visualize the results of our hyperparameter search because we had only two variables. With three hyperparameters being varied, we'll need to use a different approach. One quick way to see what is going on is to run a linear regression on the results of our hyperparameter tuninng experiment:
+
+```{r lm1}
+lm(acc~ntree+mtry+sampsize,data=h_scaled_rf) %>% summary
+```
+
+It looks like `ntree` doesn't matter very much, and `sampsize` matters a little bit, while `mtry` is the most important. Note that this quick check only tells us about linear relationships -- if the model-fitting performs poorly for low and high values of a parameter but better at a "happy medium", we won't see that here.
+
+We can compare this intuition hold up with which hyperparameter combinations actually came out at the top:
+
+``` {r hparam1}
+h_scaled_rf %>% arrange(desc(acc)) %>% head
+```
+
+To assuage any doubts about whether the hyperparameter search was worth it, we can compare the results to what we would have gotten if we'd just used the default parameters:
+
+``` {r rf_default}
+default_scaled_rf <- rf_xval(d_scaled,5)
+mean(h_scaled_rf$acc >= mean(default_scaled_rf))
+```
+
+So about `r paste0(round(100*mean(h_scaled_rf$acc >= mean(default_scaled_rf)),1),'%')` of the hyperparameter combinations we testetd in our random search outperformed the default hyperparameters. It seems that the search was worth it, even if it did take hours. 
+
+We can do something similar to measure execution time:
+
+``` {r rftime}
+lm(dt~ntree+mtry+sampsize,data=h_scaled_rf) %>% summary
+```
+
+It's `ntree` and `sampsize` that really determine how long calculations will take, and `mtry` (which affects accuracy the most) doesn't matter much.
+
+We can now add our top-ranked solutions to our results from previous analyses:
+
+```{r rf_results}
+newrow_rf <- function(d,label,scaled) {
+  tt_acc <- t.test(d)
+  data.frame(label=label,scaled=scaled,
+             acc_mean=mean(d),
+             acc_lo=tt_acc$conf.int[1],
+             acc_hi=tt_acc$conf.int[2],
+             ll_mean=NA,ll_lo=NA,ll_hi=NA)
+}
+
+best_rf <- function(hparams,d,scaled) {
+  set.seed(12345)
+  hparams <- hparams %>% arrange(desc(acc))
+  ntree_best <- hparams[1,'ntree']
+  mtry_best <- hparams[1,'mtry']
+  sampsize_best <- hparams[1,'sampsize']
+  final <- knn_rf(d,10,ntree=ntree_best,mtry=mtry_best,sampsize=sampsize_best)
+  label <- paste0('RF: (ntree,mtry,sampsize)=(',
+                  ntree_best,',',mtry_best,',',samsize_best,')')
+  newrow_rf(final,label,scaled)
+}
+
+results <- read.csv('results.csv') %>%
+  rbind(best_rf(h_scaled_rf,d_scaled,TRUE)) %>%
+  rbind(best_rf(h_unscaled_rf,d_unscaled,FALSE)) 
+```
+
+There's another trick available to us with random forests that we couldn't do as easily with KNN. The `randomForest` package offers a way to assess the importance of variables to the final result. This is done by calculating the accuracy for the test set, then randomly shuffling the values of one variable and calculating the accuracy again. If a particular variable doesn't matter much to the final decision, then randomly changing its value won't lead to a large decrease in accuracy. 
+
+To do this, we'll build a random forest model with _all_ of our data (rather than 90% of it), and evaluate the variable importance:
+
+``` {r importance_1}
+h_scaled_rf <- arrange(h_scaled_rf,desc(acc))
+y_scaled <- as.factor(d_scaled$y)
+rf_scaled <- randomForest(x=x,y=y_scaled,
+                          ntree=h_scaled_rf[1,'ntree'],
+                          mtry=h_scaled_rf[1,'mtry'],
+                          sampsize=h_scaled_rf[1,'sampsize'],
+                          importance=TRUE)
+
+imp <- rf_scaled$importance %>% as.data.frame
+names(imp) <- c('false','true','accuracy_decrease','gini_decrease')
+imp <- imp %>%
+  mutate(label=row.names(imp),
+         label=ifelse(accuracy_decrease > 0.002,label,NA))
+ggplot(imp,aes(x=false,y=true,label=label)) +
+  geom_point(size=3,color='darkorange3') +
+  geom_text(vjust=1) +
+  #geom_text_repel() +
+  xlab('Accuracy loss for FALSE class') +
+  ylab('Accuracy loss for TRUE class') +
+  ggtitle('Scaled wealth index')
+```
+
+For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
+
+Note that these effects are asymmetric (note the difference in scale of the x and y axes). Most variables have a stronger impact on the accuracy of TRUE predictions, simply because the TRUE class is smaller.
+
+How does this look for our unscaled wealth index?
+
+``` {r importance_2}
+importance_rf <- function(h,d,title,label_cutoff=0.002) {
+  h <- arrange(h,desc(acc))
+  y <- as.factor(d$y)
+  rf <- randomForest(x=x,y=y_scaled,
+                     ntree=h_scaled[1,'ntree'],
+                     mtry=h_scaled[1,'mtry'],
+                     sampsize=h_scaled[1,'sampsize'],
+                     importance=TRUE)
+  imp <- rf$importance %>% as.data.frame
+  names(imp) <- c('false','true','accuracy_decrease','gini_decrease')
+  imp <- imp %>%
+    mutate(label=row.names(imp),
+           label=ifelse(accuracy_decrease > label_cutoff,label,NA))
+  ggplot(imp,aes(x=false,y=true,label=label)) +
+    geom_point(size=3,color='darkorange3') +
+    geom_text(vjust=1) +
+    #geom_text_repel() +
+    xlab('Accuracy loss for FALSE class') +
+    ylab('Accuracy loss for TRUE class') +
+    ggtitle(title)
+}
+
+importance_rf(h_scaled_rf,d_scaled,'Scaled wealth index')
+```
+
+For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
+
+Note that these effects are asymmetric (note the difference in scale of the x and y axes). Most variables have a stronger impact on the accuracy of TRUE predictions, simply because the TRUE class is smaller.
+
+For comparison, here's the same plot with the unscaled wealth index:
+
+```{r importance_3}
+importance_rf(h_unscaled_rf,d_unscaled,'Unscaled wealth index')
+```
+
+## Gradient-boosted machines
+
+While bagging is at the heart of random forests, _boosting_ is another piece of our ensemble-learning toolkit. The central idea behind boosting is to build a series of models, with each trained on the residuals from the previous model. In other words, we first build a model that explains the data as well as possible. We then subtract out the variance that is accounted for by this first model and build a new model to explain what's left over. This process is repeated as many times as necessary.
+
+Boosting can lead to very complex models, and is prone to overfitting. With enough iterations, a boosted model can "memorize" everything in your training dataset and fail spectacularly to generalize to test data. To avoid this, boosted models typically use hyperparameters that help to slow down the training process, for example by subtracting only a fraction of the explained variance before moving to the next iteration. Boosting can also be combined with bagging, by using only a subset of the data (or data features) at each step.
+
+We'll be using a popular gradient-boosted machine package called `xgboost`. In contrast to `randomForest`, it offers us probabilities rather than just assignments, so we'll be able to work with the log-loss this time:
+
+``` {r ll}
+logloss <- function(p,y,epsilon=0.01) {
+  p[p==0] <- epsilon
+  p[p==1] <- 1-epsilon
+  -mean(y*log2(p)) - mean((1-y)*log2(1-p))
+}
+```
+
+Another nice feature of `xgboost` is the ability to avoid overtraining using watchlists. The model is built using only data from the training set, but after each iteration its accuracy is checked on the test set. Early in the training process, the test-set accuracy will typically be slightly lower, and both will improve. Once the model begins to overfit, the training-set accuracy may continue to improve while the test-set accuracy deteriorates. By adding the test set to a training watchlist, we can stop training when the test-set accuracy stops improving. This effectively optimizes one of our hyperparameters (number of training iterations) for us.
+
+```{r xgb_cv}
+xgb_xval <- function(d,niter=10,params=list(),verbose=0) {
+  plyr::ldply(1:niter,function(i) {
+    mm <- model.matrix(~ .+0, data=select(d,-y)) 
+    s <- runif(nrow(d)) > 0.1
+    train <- xgb.DMatrix(mm[s,],label = d$y[s])
+    test <- xgb.DMatrix(mm[!s,],label = d$y[!s])
+    watchlist=list(train=train,test=test)
+    # parameters: eta, gamma, max_depth, min_child_weight, subsample, colsample_bytree
+    xgb_i <- xgb.train(params=params,
+                       data = train,
+                       watchlist=watchlist,
+                       objective = "binary:logistic",
+                       nthread=2,
+                       nrounds=200,
+                       early_stopping_rounds=10,
+                       verbose=verbose)
+    data.frame(acc=as.numeric(1 - xgb_i$best_score),
+               ll=logloss(predict(xgb_i,newdata=test),d$y[!s]))
+  })
+}
+```
+
+We'll optimize hyperparameters the same way as before, by defining a set of plausible parameter ranges and choosing random samples:
+
+```{r xgb_rsearch}
+eta_vals <- 0.025*1:16
+gamma_vals <- 0.1*1.7^(0:14)
+max_depth_vals <- 2:10
+min_child_weight_vals <- 0.1*1.7^(0:14)
+subsample_vals <- 0.1*1:10
+colsample_bytree_vals <- 0.1*1:10
+
+rsearch_xgb <- function(d,nsamp,niter) {
+  hyper <- data.frame(eta=base::sample(eta_vals,2*nsamp,replace=TRUE),
+                      gamma=base::sample(gamma_vals,2*nsamp,replace=TRUE),
+                      max_depth=base::sample(max_depth_vals,2*nsamp,replace=TRUE),
+                      min_child_weight=base::sample(min_child_weight_vals,2*nsamp,replace=TRUE),
+                      subsample=base::sample(subsample_vals,2*nsamp,replace=TRUE),
+                      colsample_bytree=base::sample(colsample_bytree_vals,2*nsamp,replace=TRUE)) %>%
+    unique %>%
+    head(nsamp)
+  plyr::ldply(1:nrow(hyper),function(j) {
+    params <- list(eta=hyper[j,'eta'],
+                   gamma=hyper[j,'gamma'],
+                   max_depth=hyper[j,'max_depth'],
+                   min_child_weight=hyper[j,'min_child_weight'],
+                   subsample=hyper[j,'subsample'],
+                   colsample_bytree=hyper[j,'colsample_bytree'])
+    ti <- Sys.time()
+    res <- xgb_xval(d,niter,params) %>% summarize(acc=mean(acc),ll=mean(ll))
+    dt <- as.double(Sys.time()-ti,units='secs')
+    paste(j,res,Sys.time()) %>% print
+    cbind(data.frame(params,dt=dt),res)
+  })
+}
+
+quick <- rsearch_xgb(d_scaled,5,1)
+```
+
+On average, each model fitting took `r round(mean(quick$dt),2)` seconds. This means that if we want 60 hyperparameter combinations with 5-fold cross-validation we'll need about `r 60*5*mean(quick$dt)/60` minutes. One clear advantage of `xgboost` over `randomForest` is that it's _much_ faster.
+
+```{r hparam_xgb}
+# Even if it's faster, it's still most of an hour to do this. Skip it for now.
+# t1 <- Sys.time()
+# h_scaled_xgb <- rsearch_xgb(d_scaled,60,5)
+# t_scaled_xgb <- Sys.time()-t1                    # About 27.1 min on my laptop
+# save(h_scaled_xgb,file='xgb_hscaled.rda')
+# t2 <- Sys.time()
+# h_unscaled_xgb <- rsearch_xgb(d_unscaled,60,5)
+# t_unscaled_xgb <- Sys.time()-t2                  # About 16.1 min on my laptop
+# save(h_unscaled_xgb,file='xgb_hunscaled.rda')
+
+load('xgb_hscaled.rda')
+load('xgb_hunscaled.rda')
+```
+
+Which hyperparameter combinations come out on top?
+
+```{r hparam_xgb2}
+h_scaled_xgb %>% arrange(desc(acc)) %>% head
+```
+
+It's striking how top-ranked solutions seem to have very different combinations of hyperparameters. One possible reason for this could be that many hyperparameters have similar (or opposing) effects, so that the hyperparameter landscape has multiple nearly-optimal points. What about the unscaled wealth index?
+
+```{r}
+h_unscaled_xgb %>% arrange(desc(acc)) %>% head
+```
+
+We'll wrap up by adding the top-ranked GBM models to our results dataframe.
+
+```{r xgb_results}
+newrow_xgb <- function(d,label,scaled) {
+  tt_acc <- t.test(d$acc)
+  tt_ll <- t.test(d$ll)
+  data.frame(label=label,scaled=scaled,
+             acc_mean=mean(d$acc),
+             acc_lo=tt_acc$conf.int[1],
+             acc_hi=tt_acc$conf.int[2],
+             ll_mean=mean(d$ll),
+             ll_lo=tt_ll$conf.int[1],
+             ll_hi=tt_ll$conf.int[2])
+}
+
+best_xgb <- function(hparams,d,scaled) {
+  set.seed(12345)
+  hparams <- hparams %>% arrange(desc(acc))
+  params <- list(eta=hparams[1,'eta'],
+                 gamma=hparams[1,'gamma'],
+                 max_depth=hparams[1,'max_depth'],
+                 min_child_weight=hparams[1,'min_child_weight'],
+                 subsample=hparams[1,'subsample'],
+                 colsample_bytree=hparams[1,'colsample_bytree'])
+  final <- xgb_xval(d,10,params)
+  label <- 'xgboost'
+  newrow_xgb(final,label,scaled)
+}
+
+results <- results %>%
+  rbind(best_xgb(h_scaled_xgb,d_scaled,TRUE)) %>%
+  rbind(best_xgb(h_unscaled_xgb,d_unscaled,FALSE)) 
+```
+
+*TODO:* Can we get variable importance from xgboost?
+
+Let's see how our tree-based models compare to what we've done before.
+
+```{r scaled}
+results %>% filter(scaled==TRUE) %>% arrange(desc(acc_mean)) %>% kable
+```
+
+*comment*
+
+What about the unscaled index?
+
+```{r unscaled}
+results %>% filter(scaled==FALSE) %>% arrange(desc(acc_mean)) %>% kable
+```
+
+*comment*
