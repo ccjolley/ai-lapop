@@ -54,9 +54,9 @@ plot(tree,uniform=TRUE)
 text(tree,use.n=TRUE,fancy=TRUE,bg='olivedrab2')
 ```
 
-In this plot, the decision points are shown as ovals and the final categorizations as rectangles. This plot can be a little bit confusing. For some reason, the `rpart` package re-classified our country (`pais') labels from numbers (which were already confusing) to letters. The split at the top of the tree sends all entries with a `pais` value of "o" to the right, and everything else to the left. "o" is the 15th letter in the alphabet, and the 15th label in our set of countries is 22, which corresponds to Haiti. So the first assumption our tree is making is that everyone who does not live in Haiti is not poor. This judgement was correct for 61,180 cases and incorrect for 4,795, as we can read from the "6.118e+04/4795" on the left-hand split.
+In this plot, the decision points are shown as ovals and the final categorizations as rectangles. This plot can be a little bit confusing. For some reason, the `rpart` package re-classified our country (`pais`) labels from numbers (which were already confusing) to letters. The split at the top of the tree sends all entries with a `pais` value of "o" to the right, and everything else to the left. "o" is the 15th letter in the alphabet, and the 15th label in our set of countries is 22, which corresponds to Haiti. So the first assumption our tree is making is that everyone who does not live in Haiti is not poor. This judgement was correct for 61,180 cases and incorrect for 4,795, as we can read from the "6.118e+04/4795" on the left-most "leaf" of the tree.
 
-That doesn't mean that all Haitians were deemed poor. Those who never use the internet (`www1 >= 4.5`) were considered to be poor. Out of Haitians who do not use the internet, 1,364 actually were poor, and 340 were not. Among at least occasional internet users, those with less than 13.5 years of education (which seems like a lot) were deemed poor, while highly-educated, non-internet-using Haitians were considered not to be poor.
+That doesn't mean that all Haitians were deemed poor. Those who never use the internet (`www1` >= 4.5) were considered to be poor. Out of Haitians who do not use the internet, 1,364 actually were poor, and 340 were not. Among at least occasional internet users, those with less than 13.5 years of education (which seems like a lot) were deemed poor, while highly-educated, non-internet-using Haitians were considered not to be poor.
 
 This tree is easy to interpret and highlight some of the same important variables we saw in logistic regression and KNN. How good are these classifications? We can read the correct classifications directly off the tree:
 
@@ -104,9 +104,12 @@ rf_xval <- function(d,niter=10,ntree=NULL,mtry=NULL,sampsize=NULL) {
 ```
 
 Random forests have a few different hyperparameters we might want to tweak:
+
 - `ntree`: Number of trees grown (default=500)
+
 - `mtry`: Number of variables randomly sampled as candidates at each split. (default=`sqrt(ncol(x))`=`r floor(sqrt(ncol(x)))`)
-- sampsize = size of sample to draw (default = `nrow(x)`)
+
+- `sampsize` = size of sample to draw (default = `nrow(x)`)
 
 ```{r rsearch_rf}
 ntree_vals <- round(100*1.3^(0:9))
@@ -126,7 +129,7 @@ rsearch_rf <- function(d,nsamp,niter) {
     ti <- Sys.time()
     res <- rf_xval(d,niter=niter,ntree=ntree,mtry=mtry,sampsize=sampsize) %>% mean
     dt <- as.double(Sys.time()-ti,units='secs')
-    paste(ntree,mtry,sampsize,res,round(dt,2)) %>% print
+    #paste(ntree,mtry,sampsize,res,round(dt,2)) %>% print
     data.frame(ntree=ntree,mtry=mtry,sampsize=sampsize,
                acc=res,dt=dt)
   })
@@ -139,9 +142,7 @@ To get a sense of how long this will take, we'll try just 5 random hyperparamete
 quick_rf <- rsearch_rf(d_scaled,5,1)
 ```
 
-Based on this quick benchmarking, each iteration should take about `r round(mean(quick_rf$dt)/60,2)` minutes. That means that if we want 60 hyperparameter combinations with 5-fold cross validation of each one, then we're looking at `r round(mean(quick$dt)*60*5/3600,2)` hours of computation. We'll want to run this overnight and cache the results.
-
-*TODO:* Still need to retrieve h_unscaled from AWS.
+Based on this quick benchmarking, each iteration should take about `r round(mean(quick_rf$dt)/60,2)` minutes. That means that if we want 60 hyperparameter combinations with 5-fold cross validation of each one, then we're looking at `r round(mean(quick_rf$dt)*60*5/3600,2)` hours of computation. We'll want to run this overnight and cache the results.
 
 ```{r hparams_rf}
 # Uncomment these rows if doing this for the first time
@@ -169,8 +170,8 @@ It looks like `ntree` doesn't matter very much, and `sampsize` matters a little 
 
 We can compare this intuition hold up with which hyperparameter combinations actually came out at the top:
 
-``` {r hparam1}
-h_scaled_rf %>% arrange(desc(acc)) %>% head
+``` {r hparam1, warning=FALSE, message=FALSE}
+h_scaled_rf %>% arrange(desc(acc)) %>% head %>% kable
 ```
 
 To assuage any doubts about whether the hyperparameter search was worth it, we can compare the results to what we would have gotten if we'd just used the default parameters:
@@ -180,7 +181,7 @@ default_scaled_rf <- rf_xval(d_scaled,5)
 mean(h_scaled_rf$acc >= mean(default_scaled_rf))
 ```
 
-So about `r paste0(round(100*mean(h_scaled_rf$acc >= mean(default_scaled_rf)),1),'%')` of the hyperparameter combinations we testetd in our random search outperformed the default hyperparameters. It seems that the search was worth it, even if it did take hours. 
+So about `r paste0(round(100*mean(h_scaled_rf$acc >= mean(default_scaled_rf)),1),'%')` of the hyperparameter combinations we tested in our random search outperformed the default hyperparameters. It seems that the search was worth it, even if it did take hours. 
 
 We can do something similar to measure execution time:
 
@@ -208,9 +209,9 @@ best_rf <- function(hparams,d,scaled) {
   ntree_best <- hparams[1,'ntree']
   mtry_best <- hparams[1,'mtry']
   sampsize_best <- hparams[1,'sampsize']
-  final <- knn_rf(d,10,ntree=ntree_best,mtry=mtry_best,sampsize=sampsize_best)
+  final <- rf_xval(d,10,ntree=ntree_best,mtry=mtry_best,sampsize=sampsize_best)
   label <- paste0('RF: (ntree,mtry,sampsize)=(',
-                  ntree_best,',',mtry_best,',',samsize_best,')')
+                  ntree_best,',',mtry_best,',',sampsize_best,')')
   newrow_rf(final,label,scaled)
 }
 
@@ -223,43 +224,14 @@ There's another trick available to us with random forests that we couldn't do as
 
 To do this, we'll build a random forest model with _all_ of our data (rather than 90% of it), and evaluate the variable importance:
 
-``` {r importance_1}
-h_scaled_rf <- arrange(h_scaled_rf,desc(acc))
-y_scaled <- as.factor(d_scaled$y)
-rf_scaled <- randomForest(x=x,y=y_scaled,
-                          ntree=h_scaled_rf[1,'ntree'],
-                          mtry=h_scaled_rf[1,'mtry'],
-                          sampsize=h_scaled_rf[1,'sampsize'],
-                          importance=TRUE)
-
-imp <- rf_scaled$importance %>% as.data.frame
-names(imp) <- c('false','true','accuracy_decrease','gini_decrease')
-imp <- imp %>%
-  mutate(label=row.names(imp),
-         label=ifelse(accuracy_decrease > 0.002,label,NA))
-ggplot(imp,aes(x=false,y=true,label=label)) +
-  geom_point(size=3,color='darkorange3') +
-  geom_text(vjust=1) +
-  #geom_text_repel() +
-  xlab('Accuracy loss for FALSE class') +
-  ylab('Accuracy loss for TRUE class') +
-  ggtitle('Scaled wealth index')
-```
-
-For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
-
-Note that these effects are asymmetric (note the difference in scale of the x and y axes). Most variables have a stronger impact on the accuracy of TRUE predictions, simply because the TRUE class is smaller.
-
-How does this look for our unscaled wealth index?
-
-``` {r importance_2}
+``` {r importance_1, message=FALSE, warning=FALSE}
 importance_rf <- function(h,d,title,label_cutoff=0.002) {
   h <- arrange(h,desc(acc))
   y <- as.factor(d$y)
-  rf <- randomForest(x=x,y=y_scaled,
-                     ntree=h_scaled[1,'ntree'],
-                     mtry=h_scaled[1,'mtry'],
-                     sampsize=h_scaled[1,'sampsize'],
+  rf <- randomForest(x=x,y=y,
+                     ntree=h[1,'ntree'],
+                     mtry=h[1,'mtry'],
+                     sampsize=h[1,'sampsize'],
                      importance=TRUE)
   imp <- rf$importance %>% as.data.frame
   names(imp) <- c('false','true','accuracy_decrease','gini_decrease')
@@ -276,6 +248,16 @@ importance_rf <- function(h,d,title,label_cutoff=0.002) {
 }
 
 importance_rf(h_scaled_rf,d_scaled,'Scaled wealth index')
+```
+
+For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
+
+Note that these effects are asymmetric (note the difference in scale of the x and y axes). Most variables have a stronger impact on the accuracy of TRUE predictions, simply because the TRUE class is smaller.
+
+How does this look for our unscaled wealth index?
+
+``` {r importance_2, message=FALSE, warning=FALSE}
+importance_rf(h_unscaled_rf,d_unscaled,'Unscaled wealth index')
 ```
 
 For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
@@ -314,7 +296,6 @@ xgb_xval <- function(d,niter=10,params=list(),verbose=0) {
     train <- xgb.DMatrix(mm[s,],label = d$y[s])
     test <- xgb.DMatrix(mm[!s,],label = d$y[!s])
     watchlist=list(train=train,test=test)
-    # parameters: eta, gamma, max_depth, min_child_weight, subsample, colsample_bytree
     xgb_i <- xgb.train(params=params,
                        data = train,
                        watchlist=watchlist,
@@ -358,7 +339,7 @@ rsearch_xgb <- function(d,nsamp,niter) {
     ti <- Sys.time()
     res <- xgb_xval(d,niter,params) %>% summarize(acc=mean(acc),ll=mean(ll))
     dt <- as.double(Sys.time()-ti,units='secs')
-    paste(j,res,Sys.time()) %>% print
+    #paste(j,res,Sys.time()) %>% print
     cbind(data.frame(params,dt=dt),res)
   })
 }
@@ -366,7 +347,7 @@ rsearch_xgb <- function(d,nsamp,niter) {
 quick <- rsearch_xgb(d_scaled,5,1)
 ```
 
-On average, each model fitting took `r round(mean(quick$dt),2)` seconds. This means that if we want 60 hyperparameter combinations with 5-fold cross-validation we'll need about `r 60*5*mean(quick$dt)/60` minutes. One clear advantage of `xgboost` over `randomForest` is that it's _much_ faster.
+On average, each model fitting took `r round(mean(quick$dt),2)` seconds. This means that if we want 60 hyperparameter combinations with 5-fold cross-validation we'll need about `r round(60*5*mean(quick$dt)/60,2)` minutes. One clear advantage of `xgboost` over `randomForest` is that it's _much_ faster.
 
 ```{r hparam_xgb}
 # Even if it's faster, it's still most of an hour to do this. Skip it for now.
@@ -386,13 +367,13 @@ load('xgb_hunscaled.rda')
 Which hyperparameter combinations come out on top?
 
 ```{r hparam_xgb2}
-h_scaled_xgb %>% arrange(desc(acc)) %>% head
+h_scaled_xgb %>% arrange(desc(acc)) %>% head %>% kable
 ```
 
 It's striking how top-ranked solutions seem to have very different combinations of hyperparameters. One possible reason for this could be that many hyperparameters have similar (or opposing) effects, so that the hyperparameter landscape has multiple nearly-optimal points. What about the unscaled wealth index?
 
 ```{r}
-h_unscaled_xgb %>% arrange(desc(acc)) %>% head
+h_unscaled_xgb %>% arrange(desc(acc)) %>% head %>% kable
 ```
 
 We'll wrap up by adding the top-ranked GBM models to our results dataframe.
@@ -437,7 +418,7 @@ Let's see how our tree-based models compare to what we've done before.
 results %>% filter(scaled==TRUE) %>% arrange(desc(acc_mean)) %>% kable
 ```
 
-*comment*
+Our tree-based methods outperformed what we've seen before. It's noteworthy that, in addition to higher average accuracy, they can also be more consistent, with xgboost offering a smaller 95% confidence interval than others.
 
 What about the unscaled index?
 
@@ -445,4 +426,8 @@ What about the unscaled index?
 results %>% filter(scaled==FALSE) %>% arrange(desc(acc_mean)) %>% kable
 ```
 
-*comment*
+Gradient boosted machines also give us the best performance here, with xgboost _almost_ beating the 90% level that we'd need for a credible model. 
+
+```{r}
+write.csv(results,'results.csv',row.names=FALSE)
+```

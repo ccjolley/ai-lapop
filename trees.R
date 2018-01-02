@@ -186,9 +186,9 @@ best_rf <- function(hparams,d,scaled) {
   ntree_best <- hparams[1,'ntree']
   mtry_best <- hparams[1,'mtry']
   sampsize_best <- hparams[1,'sampsize']
-  final <- knn_rf(d,10,ntree=ntree_best,mtry=mtry_best,sampsize=sampsize_best)
+  final <- rf_xval(d,10,ntree=ntree_best,mtry=mtry_best,sampsize=sampsize_best)
   label <- paste0('RF: (ntree,mtry,sampsize)=(',
-                  ntree_best,',',mtry_best,',',samsize_best,')')
+                  ntree_best,',',mtry_best,',',sampsize_best,')')
   newrow_rf(final,label,scaled)
 }
 
@@ -201,9 +201,9 @@ importance_rf <- function(h,d,title,label_cutoff=0.002) {
   h <- arrange(h,desc(acc))
   y <- as.factor(d$y)
   rf <- randomForest(x=x,y=y_scaled,
-                     ntree=h_scaled[1,'ntree'],
-                     mtry=h_scaled[1,'mtry'],
-                     sampsize=h_scaled[1,'sampsize'],
+                     ntree=h[1,'ntree'],
+                     mtry=h[1,'mtry'],
+                     sampsize=h[1,'sampsize'],
                      importance=TRUE)
   imp <- rf$importance %>% as.data.frame
   names(imp) <- c('false','true','accuracy_decrease','gini_decrease')
@@ -218,7 +218,6 @@ importance_rf <- function(h,d,title,label_cutoff=0.002) {
     ylab('Accuracy loss for TRUE class') +
     ggtitle(title)
 }
-
 importance_rf(h_scaled,d_scaled,'Scaled wealth index')
 importance_rf(h_unscaled,d_unscaled,'Unscaled wealth index')
 
