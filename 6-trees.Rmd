@@ -260,16 +260,6 @@ How does this look for our unscaled wealth index?
 importance_rf(h_unscaled_rf,d_unscaled,'Unscaled wealth index')
 ```
 
-For the most part, the variables that look important here are similar to the ones that were highly significant in the logistic regression. We're seeing geographic factors (`pais`,`ur`,`tamano`), demographics (`leng1`,`etid`,`q2`), household economics (`q10d`) and variables related to education or information consumption (`ed`,`www1`,`gi0`).
-
-Note that these effects are asymmetric (note the difference in scale of the x and y axes). Most variables have a stronger impact on the accuracy of TRUE predictions, simply because the TRUE class is smaller.
-
-For comparison, here's the same plot with the unscaled wealth index:
-
-```{r importance_3}
-importance_rf(h_unscaled_rf,d_unscaled,'Unscaled wealth index')
-```
-
 ## Gradient-boosted machines
 
 While bagging is at the heart of random forests, _boosting_ is another piece of our ensemble-learning toolkit. The central idea behind boosting is to build a series of models, with each trained on the residuals from the previous model. In other words, we first build a model that explains the data as well as possible. We then subtract out the variance that is accounted for by this first model and build a new model to explain what's left over. This process is repeated as many times as necessary.
